@@ -1,21 +1,21 @@
-module SpSkipGramA
+module SpSkipGramC
+# share sparse representations
 using CUDArt: HostArray, CudaArray, synchronize, null_stream
 using JLD: jldopen
 using CycUtils: invertable_unique, get, set!
 using Veclib: gamma_kernel!, gamma_kernel_loss!, normalize_columns!
 
-export SparseSkipGramA, train, init, close_device
+export SparseSkipGramC, train, init, close_device
 
 include("config.jl")
 include("array_handler.jl")
 include("samples.jl")
 include("utils.jl")
 
-type SparseSkipGramA{Tensor} # Tensor could be HostArray{Float32, 2}
+type SparseSkipGramC{Tensor} # Tensor could be HostArray{Float32, 2}
     α::Tensor
-    β::Tensor
     B::Tensor
-    C::Tensor
+    V::Tensor
 
     # the following fields are training parameters.
     m::Int
@@ -30,22 +30,18 @@ type SparseSkipGramA{Tensor} # Tensor could be HostArray{Float32, 2}
 
     # the following fields are named memory for training
     ᾱ::Tensor
-    β̄::Tensor
     a⃗::Tensor
     b⃗::Tensor
     γ::Tensor
     σ::Tensor
     ∇α::Tensor
     N::Tensor
-    M::Tensor
-    ∇β::Tensor
-    Q::Tensor
     ∇B::Tensor
-    ∇C::Tensor
+    ∇V::Tensor
     idxes::Tensor
     sign::Tensor
 
-    function SparseSkipGramA(d::Integer, # vector dimension
+    function SparseSkipGramC(d::Integer, # vector dimension
         num_base::Integer,     # number of atom words
         num_vocab::Integer,    # number of vocabulary
         mini_batch::Integer,     # mini-batch size
@@ -57,9 +53,8 @@ type SparseSkipGramA{Tensor} # Tensor could be HostArray{Float32, 2}
         @assert num_base ≤ num_vocab "The number of atom words must be less than the vocabulary size"
 
         α_ = randn(Float32, num_base, num_vocab) ./ sqrt(num_base)
-        β_ = randn(Float32, num_base, num_vocab) ./ sqrt(num_base)
         B_ = rand(Float32, d, num_base)
-        C_ = rand(Float32, d, num_base)
+        V_ = rand(Float32, d, num_vocab)
 
         i2w = Array{String, 1}()
         w2i = Dict{String, UInt32}()
@@ -78,64 +73,53 @@ type SparseSkipGramA{Tensor} # Tensor could be HostArray{Float32, 2}
             end
 
             α_[1:num_base, 1:num_base] = eye(num_base)
-            β_[1:num_base, 1:num_base] = eye(num_base)
             copy!(B_, @view e[:, 1:num_base])
-            copy!(C_, @view c[:, 1:num_base])
+            copy!(V_, @view c[:, 1:num_vocab])
         end
 
         α = Tensor(α_)
-        β = Tensor(β_)
         B = Tensor(B_)
-        C = Tensor(C_)
+        V = Tensor(V_)
 
         ᾱ = Tensor(Float32, num_base, mini_batch)
-        β̄ = Tensor(Float32, num_base, negative+1, mini_batch)
         a⃗ = Tensor(Float32, d, mini_batch)
         b⃗ = Tensor(Float32, d, negative+1, mini_batch)
         γ = Tensor(Float32, negative+1, mini_batch)
         σ = Tensor(Float32, negative+1, mini_batch)
         ∇α = Tensor(Float32, num_base, mini_batch)
         N = Tensor(Float32, d, mini_batch)
-        M = Tensor(Float32, num_base, mini_batch)
-        ∇β = Tensor(Float32, num_base, negative+1, mini_batch)
-        Q = Tensor(Float32, num_base, mini_batch)
         ∇B = Tensor(Float32, d, num_base)
-        ∇C = Tensor(Float32, d, num_base)
+        ∇V = Tensor(Float32, d, negative+1, mini_batch)
         idxes = Tensor(UInt32, (negative+2)*mini_batch)
 
         fill!(ᾱ, 0.0)
-        fill!(β̄, 0.0)
         fill!(a⃗, 0.0)
         fill!(b⃗, 0.0)
         fill!(γ, 0.0)
         fill!(σ, 0.0)
         fill!(∇α, 0.0)
         fill!(N, 0.0)
-        fill!(M, 0.0)
-        fill!(∇β, 0.0)
-        fill!(Q, 0.0)
         fill!(∇B, 0.0)
-        fill!(∇C, 0.0)
+        fill!(∇V, 0.0)
         fill!(idxes, 0)
 
         tmp = -ones(Float32, (negative+1, mini_batch))
         tmp[1, :] = 1.0f0
         s = Tensor(tmp)
 
-        new(α, β, B, C,                               # model parameters
-            mini_batch, negative, lr, lr, λ,              # training parameters
-            i2w, w2i,                                 # maps
-            ᾱ, β̄, a⃗, b⃗, γ, σ, ∇α, N, M, ∇β, Q, ∇B, ∇C, idxes, s #work memory
+        new{Tensor}(α, B, V, # model parameters
+          mini_batch, negative, lr, lr, λ, # training parameters
+          i2w, w2i,  # maps
+          ᾱ, a⃗, b⃗, γ, σ, ∇α, N, ∇B, ∇V, idxes, s
         )
     end
 end
 
-function save(model::SparseSkipGramA{Array}, fname::String; save_maps=false)
+function save(model::SparseSkipGramC{Array}, fname::String; save_maps=false)
     jldopen(fname, "w") do f
         write(f, "α", model.α)
-        write(f, "β", model.β)
         write(f, "B", model.B)
-        write(f, "C", model.C)
+        write(f, "V", model.V)
 
         # the following fields are training parameters.
         write(f, "m", model.m)
@@ -151,21 +135,21 @@ function save(model::SparseSkipGramA{Array}, fname::String; save_maps=false)
     end
 end
 
-num_vocab(model::SparseSkipGramA) = size(model.α, 2)
-num_base(model::SparseSkipGramA) = size(model.α, 1)
-num_vecdim(model::SparseSkipGramA) = size(model.B, 1)
-num_minibatch(model::SparseSkipGramA) = size(model.a⃗, 2)
-num_negative(model::SparseSkipGramA) = size(model.b⃗, 2) - 1
+num_vocab(model::SparseSkipGramC) = size(model.α, 2)
+num_base(model::SparseSkipGramC) = size(model.α, 1)
+num_vecdim(model::SparseSkipGramC) = size(model.B, 1)
+num_minibatch(model::SparseSkipGramC) = size(model.a⃗, 2)
+num_negative(model::SparseSkipGramC) = size(model.b⃗, 2) - 1
 
-function to_device{M <: Union{SparseSkipGramA{Array},
-                    SparseSkipGramA{HostArray}}}(model::M)
+function to_device{M <: Union{SparseSkipGramC{Array},
+                    SparseSkipGramC{HostArray}}}(model::M)
     d = num_vecdim(model)
     num_base_ = num_base(model)
     num_vocab_ = num_vocab(model)
     mini_batch = num_minibatch(model)
     negative = num_negative(model)
 
-    d_model = SparseSkipGramA{CudaArray}(d, num_base_, num_vocab_, mini_batch,
+    d_model = SparseSkipGramC{CudaArray}(d, num_base_, num_vocab_, mini_batch,
                                         negative, model.lr, model.λ)
     for fn in fieldnames(typeof(d_model))
         dest = getfield(d_model, fn)
@@ -177,7 +161,7 @@ function to_device{M <: Union{SparseSkipGramA{Array},
     return d_model
 end
 
-@generated function get_training_model(model::SparseSkipGramA)
+@generated function get_training_model(model::SparseSkipGramC)
     if BACKEND == "GPU"
         return :(to_device(model))
     else
@@ -185,97 +169,59 @@ end
     end
 end
 
-# TODO: accelerate with multiple streams.
 function compute_grad_sparse(model, batch)
     const d = num_vecdim(model)
     const m = model.m
     const k = model.k
     const B = model.B
-    const C = model.C
+    const V = model.V
     const N = model.N
-    const M = model.M
     w, c = batch
     const nb = num_base(model)
     const ᾱ = takelast!(model.ᾱ, model.α, w)
-    const β̄ = takelast!(model.β̄, model.β, c)
     const a⃗ = model.a⃗
-    const b⃗ = model.b⃗
+    const b⃗ = takelast!(model.b⃗, model.V, c)
     const γ = model.γ
     const ∇α = model.∇α
-    const ∇β = model.∇β
+    const ∇V = model.∇V
+    const ∇B = model.∇B
 
-    flat_b⃗ = reshape(b⃗, (d, (k+1)*m))
+    # flat_b⃗ = reshape(b⃗, (d, (k+1)*m))
     gemm!('N', 'N', 1.0f0, B, ᾱ, 0.0f0, a⃗)
-    gemm!('N', 'N', 1.0f0, C, reshape(β̄, (nb, (k+1)*m)), 0.0f0, flat_b⃗)
-
-    # TODO: for GPU, we can use multiple of streams to overlap the computations and data transferring.  This need profiling. make a benchmark test first. Candidate solutions: (1) simple iteration with one stream; (2) simple iteration with multiple streams; (3) batched calling with gemm.
 
     a⃗_ = reshape(a⃗, (d, 1, m))
     γ_ = reshape(γ, (k+1, 1, m))
     gemm_strided_batched!('T', 'N', 1.0f0, b⃗, a⃗_, 0.0f0, γ_)
     gamma_kernel_loss!(γ, model.σ, model.sign)
 
-    # ∇α
+    #∇α
     N_ = reshape(N, (d, 1, m))
     gemm_strided_batched!('N', 'N', 1.0f0, b⃗, γ_, 0.0f0, N_)
     gemm!('T', 'N', 1.0f0, B, N, 0.0f0, ∇α)
 
-    # ∇β
-    gemm!('T', 'N', 1.0f0, C, a⃗, 0.0f0, M)
-    M_ = reshape(M, (num_base(model), 1, m))
-    gemm_strided_batched!('N', 'T', 1.0f0, M_, γ_, 0.0f0, ∇β)
+    # ∇V
+    gemm_strided_batched!('N', 'T', 1.0f0, a⃗_, γ_, 0.0f0, ∇V)
+
     nothing
 end
-
 
 function accumulate_grad_dict(model, t)
     const m = model.m
     const k = model.k
+
     w1 = (Float32(t)/(t+1)) :: Float32
     w2 = (1.0f0/(t+1)) :: Float32
 
+    # ∇B
+    # gemm!('N', 'T', 1.0f0, N, ᾱ, 0.0f0, ∇B)
     gemm!('N', 'T', w2, model.N, model.ᾱ, w1, model.∇B)
-    β̄ = model.β̄  # |B|×(k+1)×m
-    γ = reshape(model.γ, (k+1, 1, m))  # (k+1) × 1 × m
-    Q = reshape(model.Q, (num_base(model), 1, m)) # |B| × 1 × m
-    gemm_strided_batched!('N', 'N', 1.0f0, β̄, γ, 0.0f0, Q)
-    gemm!('N', 'T', w2, model.a⃗, model.Q, w1, model.∇C)
     nothing
 end
 
-function update_dict_u1f1!(model)
-    const m = model.m
-    const k = model.k
-    const lr_ = model.lr
-
-    gemm!('N', 'T', -lr_, model.N, model.ᾱ, 1.0f0, model.B)
-    β̄ = model.β̄  # |B|×(k+1)×m
-    γ = reshape(model.γ, (k+1, 1, m))  # (k+1) × 1 × m
-    Q = reshape(model.Q, (num_base(model), 1, m)) # |B| × 1 × m
-    gemm_strided_batched!('N', 'N', 1.0f0, β̄, γ, 0.0f0, Q)
-    gemm!('N', 'T', -lr_, model.a⃗, model.Q, 1.0f0, model.C)
-    nothing
-end
-
-function update_dict_u2f1!(model)
-    const m = model.m
-    const k = model.k
-    const lr_ = model.lr
-
-    gemm!('N', 'T', 1.0f0, model.N, model.ᾱ, 0.0f0, model.∇B)
-    β̄ = model.β̄  # |B|×(k+1)×m
-    γ = reshape(model.γ, (k+1, 1, m))  # (k+1) × 1 × m
-    Q = reshape(model.Q, (num_base(model), 1, m)) # |B| × 1 × m
-    gemm_strided_batched!('N', 'N', 1.0f0, β̄, γ, 0.0f0, Q)
-    gemm!('N', 'T', 1.0f0, model.a⃗, model.Q, 0.0f0, model.∇C)
-    update_dict_u2!(model)
-    nothing
-end
-
-function fetch_grad_sparse!(grad::Tuple, model)
-    copy!(grad[1], model.∇α)
-    copy!(grad[2], model.∇β)
-    return grad
+function fetch_grad_sparse!(grads, model)
+    copy!(grads[1], model.∇α)
+    copy!(grads[2], model.∇V)
+    return grads
 end
 
 # function cpu_sparse_update!(arr, grad, idxes, lr, lambda)
@@ -293,27 +239,32 @@ end
 # end
 
 function gpu_sparse_update!(arr, grad, idxes, lr, lambda)
-    # make sure the transferring completes.
-    CUDArt.synchronize(CUDArt.null_stream)
     ccall((:sparse_update, vec_lib), Void, (Ptr{Float32}, Ptr{Float32},
         Cint, Cint, Ptr{Cuint}, Float32, Float32, Ptr{Void}, Cint),
         arr.ptr, grad.ptr, size(grad, 1), size(grad, 2),
         idxes.ptr, lr, lambda, null_stream.inner.handle, 256)
 end
 
-@generated function proximal_update!(model, grads, idxes)
+function gpu_V_update!(arr, grad, idxes, lr)
+    ccall((:sparse_update_V, vec_lib), Void, (Ptr{Float32}, Ptr{Float32},
+        Cint, Cint, Ptr{Cuint}, Float32, Ptr{Void}, Cint),
+        arr.ptr, grad.ptr, size(grad, 1), size(grad, 2),
+        idxes.ptr, lr, null_stream.inner.handle, 256)
+end
+
+@generated function proximal_update!(model, grads::Tuple, idxes::Tuple)
     if BACKEND == "GPU"
         quote
-            const lr_::Float32 =  model.lr
+            lr_::Float32 = model.lr
             dev = Int(DEVICE)
-            ∇α, ∇β = grads
+            ∇α, ∇V = grads
             w, c = idxes
             siz_α = (num_base(model), length(w))
-            siz_β = (num_base(model), length(c))
+            siz_V = (num_vecdim(model), length(c))
             grad_α = CudaArray(model.∇α.ptr, siz_α, dev)
-            grad_β = CudaArray(model.∇β.ptr, siz_β, dev)
+            grad_V = CudaArray(model.∇V.ptr, siz_V, dev)
             copy!(grad_α, ∇α)
-            copy!(grad_β, ∇β)
+            copy!(grad_V, ∇V)
 
             ptr_w = model.idxes.ptr
             ptr_c = ptr_w + length(w)*sizeof(UInt32)
@@ -321,125 +272,133 @@ end
             d_c = CudaArray(ptr_c, (length(c),), dev)
             copy!(d_c, c)
             copy!(d_w, w)
-            # CUDArt.synchronize(CUDArt.null_stream)
+
+            # make sure the transferring completes.
+            CUDArt.synchronize(CUDArt.null_stream)
             gpu_sparse_update!(model.α, grad_α, d_w, lr_, model.λ)
-            gpu_sparse_update!(model.β, grad_β, d_c, lr_, model.λ)
+            gpu_V_update!(model.V, grad_V, d_c, lr_)
         end
     else
         quote
             error("Not implemented")
-            # const lr_ =
+            # lr_::Float32 = model.lr
             # ∇α, ∇β = grads
             # w, c = idxes
             #
             # cpu_sparse_update!(model.α, ∇α, w, lr_, model.λ)
-            # cpu_sparse_update!(model.β, ∇β, c, lr_, model.λ)
+            # cpu_V_update!(model.V, grad_V, d_c, lr_)
         end
     end
 end
 
-function update_sparse_u1!(model, grad_cache, grad, uniq_batch)
-    ∇α, ∇β = grad_cache
-    grad_α, grad_β = grad
-    uniq_w, uniq_c = uniq_batch
-    w, inv_w = uniq_w
-    c, inv_c = uniq_c
 
-    ∇α = @view ∇α[:, 1:length(w)]
-    ∇β = @view ∇β[:, 1:length(c)]
+function update_sparse_u2!(model, grad_cache::Tuple, grad_αV::Tuple, uniq_batch)
+    const δ = inv(prevfloat(typemax(Float32)))
+    uniq_w, uniq_c = uniq_batch
+    idx_w, inv_w = uniq_w
+    idx_c, inv_c = uniq_c
+
+    ∇α, ∇V = grad_cache
+    grad_α, grad_V = grad_αV
+    grad_V = reshape(grad_V, (size(grad_V, 1), size(grad_V, 2)*size(grad_V, 3)))
+
+    ∇α = @view ∇α[:, 1:length(idx_w)]
+    ∇V = @view ∇V[:, 1:length(idx_c)]
     fill!(∇α, 0.0f0)
-    fill!(∇β, 0.0f0)
+    fill!(∇V, 0.0f0)
 
     # make sure the transferring completes.
     CUDArt.synchronize(CUDArt.null_stream)
 
-    for (i, inv_idx) in enumerate(inv_w)
-        ∇α[:, inv_idx] += grad_α[:, i]
-    end
-
-    for (i, inv_idx) in enumerate(inv_c)
-        ∇β[:, inv_idx] += grad_β[:, i]
-    end
-    proximal_update!(model, [∇α, ∇β], [w, c])
-    nothing
-end
-
-function update_sparse_u2!(model, grad_cache, grad, uniq_batch)
-    ∇α, ∇β = grad_cache
-    grad_α, grad_β = grad
-    uniq_w, uniq_c = uniq_batch
-    w, inv_w = uniq_w
-    c, inv_c = uniq_c
-
-    ∇α = @view ∇α[:, 1:length(w)]
-    ∇β = @view ∇β[:, 1:length(c)]
-    fill!(∇α, 0.0f0)
-    fill!(∇β, 0.0f0)
-
-    # make sure the transferring completes.
-    CUDArt.synchronize(CUDArt.null_stream)
-
-    for (i, inv_idx) in enumerate(inv_w)
+    @inbounds for (i, inv_idx) in enumerate(inv_w)
         ∇α[:, inv_idx] += grad_α[:, i]
     end
     normalize_columns!(∇α)
 
-    for (i, inv_idx) in enumerate(inv_c)
-        ∇β[:, inv_idx] += grad_β[:, i]
+    @inbounds for (i, inv_idx) in enumerate(inv_c)
+        ∇V[:, inv_idx] += grad_V[:, i]
     end
-    normalize_columns!(∇β)
+    normalize_columns!(∇V)
 
-    proximal_update!(model, [∇α, ∇β], [w, c])
+    proximal_update!(model, (∇α, ∇V), (idx_w, idx_c))
+    nothing
+end
+
+function update_sparse_u1!(model, grad_cache::Tuple, grad_αV::Tuple, uniq_batch)
+    const δ = inv(prevfloat(typemax(Float32)))
+    uniq_w, uniq_c = uniq_batch
+    idx_w, inv_w = uniq_w
+    idx_c, inv_c = uniq_c
+
+    ∇α, ∇V = grad_cache
+    grad_α, grad_V = grad_αV
+    grad_V = reshape(grad_V, (size(grad_V, 1), size(grad_V, 2)*size(grad_V, 3)))
+
+    ∇α = @view ∇α[:, 1:length(idx_w)]
+    ∇V = @view ∇V[:, 1:length(idx_c)]
+    fill!(∇α, 0.0f0)
+    fill!(∇V, 0.0f0)
+
+    # make sure the transferring completes.
+    CUDArt.synchronize(CUDArt.null_stream)
+
+    @inbounds for (i, inv_idx) in enumerate(inv_w)
+        ∇α[:, inv_idx] += grad_α[:, i]
+    end
+
+    @inbounds for (i, inv_idx) in enumerate(inv_c)
+        ∇V[:, inv_idx] += grad_V[:, i]
+    end
+
+    proximal_update!(model, (∇α, ∇V), (idx_w, idx_c))
+    nothing
+end
+
+
+const ∇B_cache = Ref{HostArray}()
+function update_dict_u2!(model)
+    global ∇B_cache
+    ∇B = ∇B_cache[]
+    const lr_::Float32 = model.lr
+
+    copy!(∇B, model.∇B)
+    CUDArt.synchronize(CUDArt.null_stream)
+    normalize_columns!(∇B)
+    copy!(model.∇B, ∇B)
+    CUDArt.synchronize(CUDArt.null_stream)
+    axpy!(-lr_, vec(model.∇B), vec(model.B))
     nothing
 end
 
 function update_dict_u1!(model)
     const lr_::Float32 = model.lr
     axpy!(-lr_, vec(model.∇B), vec(model.B))
-    axpy!(-lr_, vec(model.∇C), vec(model.C))
     nothing
 end
 
-const ∇B_cache = Ref{HostArray}()
-const ∇C_cache = Ref{HostArray}()
-function update_dict_u2!(model)
-    global ∇B_cache
-    global ∇C_cache
-    ∇B = ∇B_cache[]
-    ∇C = ∇C_cache[]
-    lr_::Float32 = model.lr
+function update_dict_u1f1!(model)
+    const m = model.m
+    const k = model.k
+    # ∇B
+    # gemm!('N', 'T', 1.0f0, N, ᾱ, 0.0f0, ∇B)
+    gemm!('N', 'T', -model.lr, model.N, model.ᾱ, 1.0f0, model.B)
+    nothing
+end
 
+function update_dict_u2f1!(model)
+    const m = model.m
+    const k = model.k
+    global ∇B_cache
+    ∇B = ∇B_cache[]
+    # ∇B
+    gemm!('N', 'T', 1.0f0, N, ᾱ, 0.0f0, ∇B)
     copy!(∇B, model.∇B)
     CUDArt.synchronize(CUDArt.null_stream)
     normalize_columns!(∇B)
     copy!(model.∇B, ∇B)
-    copy!(∇C, model.∇C)
     CUDArt.synchronize(CUDArt.null_stream)
-    axpy!(-lr_, vec(model.∇B), vec(model.B))
-    normalize_columns!(∇C)
-    copy!(model.∇C, ∇C)
-    axpy!(-lr_, vec(model.∇C), vec(model.C))
+    axpy!(-model.lr, vec(model.∇B), vec(model.B))
     nothing
-end
-
-function update_all_u11!(model, grad_cache, grad, uniq_batch)
-    update_sparse_u1!(model, grad_cache, grad, uniq_batch)
-    update_dict_u1!(model)
-end
-
-function update_all_u12!(model, grad_cache, grad, uniq_batch)
-    update_sparse_u1!(model, grad_cache, grad, uniq_batch)
-    update_dict_u2!(model)
-end
-
-function update_all_u21!(model, grad_cache, grad, uniq_batch)
-    update_sparse_u2!(model, grad_cache, grad, uniq_batch)
-    update_dict_u1!(model)
-end
-
-function update_all_u22!(model, grad_cache, grad, uniq_batch)
-    update_sparse_u2!(model, grad_cache, grad, uniq_batch)
-    update_dict_u2!(model)
 end
 
 @generated function sync_params!(cpu_model, model)
@@ -447,12 +406,10 @@ end
         return :(cpu_model)
     else
         quote
-            for fn in (:α, :β, :B, :C)  #fieldnames(typeof(model))
+            for fn in (:α, :B, :V)
                 src = getfield(model, fn)
-                if isa(src, CudaArray)
-                     dest = getfield(cpu_model, fn)
-                     copy!(dest, src)
-                end
+                dest = getfield(cpu_model, fn)
+                copy!(dest, src)
             end
             CUDArt.synchronize(CUDArt.null_stream)
             cpu_model
@@ -508,7 +465,7 @@ end
 
 function train(model; min_lr=1f-4, normalize_sp=false,
         normalize_dict=false, every=500, preratio=0.1,
-        saveratio=0.05, part=1.0, save_basename="A")
+        saveratio=0.05, part=1.0, save_basename="C")
     if every == 1
         train_f1(model, min_lr=min_lr, normalize_sp=normalize_sp,
         normalize_dict=normalize_dict, preratio=preratio,
@@ -516,6 +473,10 @@ function train(model; min_lr=1f-4, normalize_sp=false,
         return nothing
     end
     global sampleFactory
+    if normalize_dict
+        global ∇B_cache
+        ∇B_cache[] = HostArray(Float32, (num_vecdim(model), num_base(model)))
+    end
 
     cpu_model = model
     model = to_device(cpu_model)
@@ -528,25 +489,18 @@ function train(model; min_lr=1f-4, normalize_sp=false,
     init_logger(model, st)
 
     grads = (HostArray(Float32, num_base(model), model.m),
-             HostArray(Float32, num_base(model), (model.k+1), model.m))
+             HostArray(Float32, num_vecdim(model), (model.k+1), model.m))
+
     grad_cache = (HostArray(Float32, num_base(model), model.m),
-            HostArray(Float32, num_base(model), (model.k+1)*model.m))
+                  HostArray(Float32, num_vecdim(model), (model.k+1)*model.m))
 
     factory = get(sampleFactory)
     const producer = factory.producer
+    const progress_ = factory -> progress(factory)/part
     batch_set = Task(() -> producer(factory, model.m, model.k))
 
     const update_sparse! = normalize_sp ? update_sparse_u2! : update_sparse_u1!
-    if !normalize_dict && !normalize_sp
-        const update_all! = update_all_u11!
-    elseif normalize_dict && !normalize_sp
-        const update_all! = update_all_u12!
-    elseif normalize_sp && !normalize_dict
-        const update_all! = update_all_u21!
-    else
-        const update_all! = update_all_u22!
-    end
-    const progress_ = factory -> progress(factory)/part
+    const update_dict! = normalize_dict ? update_dict_u2! : update_dict_u1!
 
     batch = consume(batch_set)
     old_batch = batch
@@ -557,8 +511,7 @@ function train(model; min_lr=1f-4, normalize_sp=false,
         uniq_w = invertable_unique(old_batch[1])
         uniq_c = invertable_unique(old_batch[2])
         uniq_batch = (uniq_w, uniq_c)
-        # wait for gpu computing completes
-        # synchronize(CUDArt.null_stream)
+
         fetch_grad_sparse!(grads, model)
         update_sparse!(model, grad_cache, grads, uniq_batch)
 
@@ -582,21 +535,21 @@ function train(model; min_lr=1f-4, normalize_sp=false,
         uniq_w = invertable_unique(old_batch[1])
         uniq_c = invertable_unique(old_batch[2])
         uniq_batch = (uniq_w, uniq_c)
+        # synchronize(CUDArt.null_stream)
         # TODO: maybe another stream to handle the data transferring
         fetch_grad_sparse!(grads, model)
+
         accumulate_grad_dict(model, nb_batch)
         if nb_batch == every - 1
-            update_all!(model, grad_cache, grads, uniq_batch)
-        else
-            update_sparse!(model, grad_cache, grads, uniq_batch)
+            update_dict!(model)
         end
+        update_sparse!(model, grad_cache, grads, uniq_batch)
 
         old_batch = batch
         compute_grad_sparse(model, old_batch)
         prog = progress_(factory)
-
         if prog >= next_save_point
-            if prog >= 1.0
+            if prog >= 1.0f0
                 break
             end
             # synchronize
@@ -622,30 +575,35 @@ end
 
 function train_f1(model; min_lr=1f-4, normalize_sp=false,
         normalize_dict=false, preratio=0.1,
-        saveratio=0.05, part=1.0, save_basename="A")
+        saveratio=0.05, part=1.0, save_basename="B")
     global sampleFactory
+    if normalize_dict
+        global ∇B_cache
+        ∇B_cache[] = HostArray(Float32, (num_vecdim(model), num_base(model)))
+    end
 
     cpu_model = model
     model = to_device(cpu_model)
 
     beta = model.lr0 / min_lr - 1.0f0
 
-    info(@sprintf("Train with lr=%g, normalize_sp=%s, normalize_dict=%s. Update dictionary parameters every 1 updates of sparse parameters. Pretrain sparse parameters with %.2f%% amount of training data. Save after every %.2f%% of training. Use %.2f%% of the total training data. Save the trained model to \"%s*.jld\"", model.lr, string(normalize_sp), string(normalize_dict), preratio*100, saveratio*100, part*100, save_basename))
+    info(@sprintf("Model [C]. train_f1: Train with lr=%g, normalize_sp=%s, normalize_dict=%s. Update dictionary parameters every 1 updates of sparse parameters. Pretrain sparse parameters with %.2f%% amount of training data. Save after every %.2f%% of training. Use %.2f%% of the total training data. Save the trained model to \"%s*.jld\"", model.lr, string(normalize_sp), string(normalize_dict), preratio*100, saveratio*100, part*100, save_basename))
 
     st = time()
     init_logger(model, st)
 
     grads = (HostArray(Float32, num_base(model), model.m),
-             HostArray(Float32, num_base(model), (model.k+1), model.m))
+             HostArray(Float32, num_vecdim(model), (model.k+1), model.m))
+
     grad_cache = (HostArray(Float32, num_base(model), model.m),
-            HostArray(Float32, num_base(model), (model.k+1)*model.m))
+                  HostArray(Float32, num_vecdim(model), (model.k+1)*model.m))
 
     factory = get(sampleFactory)
     const producer = factory.producer
     batch_set = Task(() -> producer(factory, model.m, model.k))
 
     const update_sparse! = normalize_sp ? update_sparse_u2! : update_sparse_u1!
-    const update_dict! = normalize_dict ? update_dict_u2f1! : update_dict_u1f1
+    const update_dict! = normalize_dict ? update_dict_u2f1! : update_dict_u1f1!
     const progress_ = factory -> progress(factory)/part
 
     batch = consume(batch_set)
@@ -657,8 +615,6 @@ function train_f1(model; min_lr=1f-4, normalize_sp=false,
         uniq_w = invertable_unique(old_batch[1])
         uniq_c = invertable_unique(old_batch[2])
         uniq_batch = (uniq_w, uniq_c)
-        # wait for gpu computing completes
-        # synchronize(CUDArt.null_stream)
         fetch_grad_sparse!(grads, model)
         update_sparse!(model, grad_cache, grads, uniq_batch)
 
@@ -681,17 +637,17 @@ function train_f1(model; min_lr=1f-4, normalize_sp=false,
         uniq_w = invertable_unique(old_batch[1])
         uniq_c = invertable_unique(old_batch[2])
         uniq_batch = (uniq_w, uniq_c)
+        # synchronize(CUDArt.null_stream)
         # TODO: maybe another stream to handle the data transferring
         fetch_grad_sparse!(grads, model)
-        update_dict(model)
+        update_dict!(model)
         update_sparse!(model, grad_cache, grads, uniq_batch)
 
         old_batch = batch
         compute_grad_sparse(model, old_batch)
         prog = progress_(factory)
-
         if prog >= next_save_point
-            if prog >= 1.0
+            if prog >= 1.0f0
                 break
             end
             # synchronize
@@ -711,6 +667,8 @@ function train_f1(model; min_lr=1f-4, normalize_sp=false,
         @sprintf("%s-checkpoint-100.jld", save_basename))
     info("Training finished. Saving to $sn")
     save(cpu_model, sn, save_maps=true)
+    nothing
 end
+
 
 end # end of module

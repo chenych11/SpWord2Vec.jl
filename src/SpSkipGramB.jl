@@ -145,7 +145,7 @@ function save(model::SparseSkipGramB{Array}, fname::String; save_maps=false)
         # the following fields are training parameters.
         write(f, "m", model.m)
         write(f, "k", model.k)
-        write(f, "lr", model.lr)
+        write(f, "lr", model.lr0)
         write(f, "λ", model.λ)
 
         # maps
@@ -475,6 +475,13 @@ function train(model; min_lr=1f-4, normalize_sp=false,
     end
     global sampleFactory
 
+    if normalize_dict
+        global ∇B_cache
+        global ∇C_cache
+        ∇B_cache[] = HostArray(Float32, (num_vecdim(model), num_base(model)))
+        ∇C_cache[] = HostArray(Float32, (num_vecdim(model), num_base(model)))
+    end
+
     cpu_model = model
     model = to_device(cpu_model)
 
@@ -563,16 +570,23 @@ function train(model; min_lr=1f-4, normalize_sp=false,
 end
 
 function train_f1(model; min_lr=1f-4, normalize_sp=false,
-        normalize_dict=false, every=500, preratio=0.1,
+        normalize_dict=false, preratio=0.1,
         saveratio=0.05, part=1.0, save_basename="B")
     global sampleFactory
+
+    if normalize_dict
+        global ∇B_cache
+        global ∇C_cache
+        ∇B_cache[] = HostArray(Float32, (num_vecdim(model), num_base(model)))
+        ∇C_cache[] = HostArray(Float32, (num_vecdim(model), num_base(model)))
+    end
 
     cpu_model = model
     model = to_device(cpu_model)
 
     beta = model.lr0 / min_lr - 1.0f0
 
-    info(@sprintf("Train with lr=%g, normalize_sp=%s, normalize_dict=%s. Update dictionary parameters every %d updates of sparse parameters. Pretrain sparse parameters with %.2f%% amount of training data. Save after every %.2f%% of training. Use %.2f%% of the total training data. Save the trained model to \"%s*.jld\"", model.lr, string(normalize_sp), string(normalize_dict), every, preratio*100, saveratio*100, part*100, save_basename))
+    info(@sprintf("Train with lr=%g, normalize_sp=%s, normalize_dict=%s. Update dictionary parameters every 1 updates of sparse parameters. Pretrain sparse parameters with %.2f%% amount of training data. Save after every %.2f%% of training. Use %.2f%% of the total training data. Save the trained model to \"%s*.jld\"", model.lr, string(normalize_sp), string(normalize_dict), preratio*100, saveratio*100, part*100, save_basename))
 
     st = time()
     init_logger(model, st)
@@ -585,7 +599,7 @@ function train_f1(model; min_lr=1f-4, normalize_sp=false,
     batch_set = Task(() -> producer(factory, model.m, model.k))
 
     const update_sparse! = normalize_sp ? update_sparse_u2! : update_sparse_u1!
-    const update_dict! = normalize_dict ? update_dict_u2! : update_dict_u1!
+    const update_dict! = normalize_dict ? update_dict_u2f1! : update_dict_u1f1!
     const progress_ = factory -> progress(factory)/part
 
     batch = consume(batch_set)
