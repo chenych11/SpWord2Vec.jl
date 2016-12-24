@@ -21,6 +21,10 @@ function parse_commandline()
             help = "sparseness weight"
             arg_type = Float32
             default = 1.0f-2
+        "--varepsilon"
+            help = "L2 weight for matrix A in model [D]"
+            arg_type = Float32
+            default = 1.0f-2
         "--lr", "-a"
             help = "learning rate"
             arg_type = Float32
@@ -97,23 +101,40 @@ mini_batch = parsed_args["mini_batch"]
 negative = parsed_args["negative"]
 lr = parsed_args["lr"]
 lambda = parsed_args["lambda"]
+varepsilon = parsed_args["varepsilon"]
 
 init(corpus)
-
-model = SparseSkipGram{Array}(
-    d,                  # vector dimension
-    nbase,              # number of atom words
-    nvocab,             # number of vocabulary
-    mini_batch,         # mini-batch size
-    negative,           # number of negative samples per positive sample
-    lr,                 # learning rate
-    lambda,             # sparseness weight
-    SpSkipGram.init_model)  # dumped init_model.
-
 args = Any[]
-for arg in String["min_lr", "normalize_sp", "normalize_dict", "every",
-                  "preratio", "saveratio", "part", "save_basename"]
-    push_arg!(args, parsed_args, arg)
+
+if parsed_args["model"] == "D"
+    model = SparseSkipGram{Array}(
+        nbase,              # number of atom words
+        nvocab,             # number of vocabulary
+        mini_batch,         # mini-batch size
+        negative,           # number of negative samples per positive sample
+        lr,                 # learning rate
+        lambda,             # sparseness weight
+        varepsilon,
+        SpSkipGram.init_model)  # dumped init_model.
+    for arg in String["min_lr", "normalize_sp", "saveratio", "part",
+                      "save_basename"]
+        push_arg!(args, parsed_args, arg)
+    end
+else
+    model = SparseSkipGram{Array}(
+        d,                  # vector dimension
+        nbase,              # number of atom words
+        nvocab,             # number of vocabulary
+        mini_batch,         # mini-batch size
+        negative,           # number of negative samples per positive sample
+        lr,                 # learning rate
+        lambda,             # sparseness weight
+        SpSkipGram.init_model)  # dumped init_model.
+
+    for arg in String["min_lr", "normalize_sp", "normalize_dict", "every",
+                      "preratio", "saveratio", "part", "save_basename"]
+        push_arg!(args, parsed_args, arg)
+    end
 end
 
 train(model; args...)

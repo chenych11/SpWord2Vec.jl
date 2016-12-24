@@ -474,6 +474,7 @@ function log_progress(model, current, progress=progress)
     if current >= _next_report_time[]
         σ = _sigmas_loginfo[]
         copy!(σ, model.σ)
+        CUDArt.synchronize(CUDArt.null_stream)
         loss = 0.0f0
         for x in σ
             loss += -log(x+eps(typeof(x)))
