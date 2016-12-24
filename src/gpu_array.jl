@@ -105,13 +105,6 @@ function viewlast{F <: AbstractFloat}(src::CudaArray{F}, idx::Integer)
     dest
 end
 
-import Base.reshape
-reshape(a::CudaArray, dims::Tuple) = CudaArray(a.ptr, dims, a.dev)
-reshape(a::CudaArray, dims::Integer...) = reshape(a, dims)
-
-import CUDArt.to_host
-to_host{T <: AbstractFloat}(a::Array{T}) = copy(a)
-
 function splitarray(a::CudaArray, shape1::Tuple, shape2::Tuple) :: NTuple{2, CudaArray}
     l1 = prod(shape1)
     l2 = prod(shape2)

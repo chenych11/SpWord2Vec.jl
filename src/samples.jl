@@ -8,6 +8,7 @@ type SampleFactory
     consumed :: Ref{UInt64}
     neg_prob :: Vector{Float32}
     producer :: Function
+    corpus_type :: Union{Type{String}, Type{UInt32}}
     function SampleFactory(material::String, neg_prob::Vector{Float32})
         global batch_producer
         global line_batch_producer
@@ -16,7 +17,8 @@ type SampleFactory
                 seekend(f)
                 position(f)
             end
-            return new(material, amt, Ref{UInt64}(0), neg_prob, batch_producer)
+            return new(material, amt, Ref{UInt64}(0), neg_prob, batch_producer,
+                       UInt32)
         end
 
         if !endswith(material, ".bz2")
@@ -42,7 +44,7 @@ type SampleFactory
             end
         end
         return new(material, lines, Ref{UInt64}(0), neg_prob,
-                   line_batch_producer)
+                   line_batch_producer, String)
     end
 end
 

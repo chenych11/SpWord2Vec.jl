@@ -1,5 +1,5 @@
 module SpWord2Vec
+include("extend.jl")
 include("SpSkipGramA.jl")
-# package code goes here
-
+include("SpSkipGramB.jl")
 end # module

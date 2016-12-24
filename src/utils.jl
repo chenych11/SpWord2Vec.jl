@@ -2,12 +2,12 @@ if BACKEND == "GPU"
     using CUDArt
     using CUBLAS
 end
-info(@sprintf("Using %s-%d", BACKEND, DEVICE))
 function init(material=train_data, num_buf_factor=20, prob_raise=0.75)
     global sampleFactory
     global genBufFac
     global init_model
 
+    info(@sprintf("Using %s-%d", BACKEND, DEVICE))
     idx2wf = jldopen(init_model) do f
          read(f, "idx2wf")
     end
