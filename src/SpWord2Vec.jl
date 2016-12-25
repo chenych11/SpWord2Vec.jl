@@ -1,4 +1,5 @@
 module SpWord2Vec
+include("config_global.jl")
 include("extend.jl")
 include("SpSkipGramA.jl")
 include("SpSkipGramB.jl")

@@ -26,11 +26,8 @@ function init(material=train_data, num_buf_factor=20, prob_raise=0.75)
     set!(sampleFactory, SampleFactory(material, idx2wf))
     set!(genBufFac, convert(UInt32,num_buf_factor))
     if BACKEND == "GPU"
-        CUDArt.device(DEVICE)
-        # atexit(()->CUDArt.device_reset(DEVICE))
+        # CUDArt.device(DEVICE)  # already set in config_global.jl
         CUDArt.init(DEVICE)
-        # atexit(()->CUDArt.close(DEVICE))
-        # atexit(CUBLAS.destroy)
     end
 end
 
