@@ -518,6 +518,13 @@ function train(model; min_lr=1f-4, normalize_sp=false,
     end
     global sampleFactory
 
+    if normalize_dict
+        global ∇B_cache
+        global ∇C_cache
+        ∇B_cache[] = HostArray(Float32, (num_vecdim(model), num_base(model)))
+        ∇C_cache[] = HostArray(Float32, (num_vecdim(model), num_base(model)))
+    end
+
     cpu_model = model
     model = to_device(cpu_model)
 
@@ -625,6 +632,13 @@ function train_f1(model; min_lr=1f-4, normalize_sp=false,
         normalize_dict=false, preratio=0.1,
         saveratio=0.05, part=1.0, save_basename="A")
     global sampleFactory
+
+    if normalize_dict
+        global ∇B_cache
+        global ∇C_cache
+        ∇B_cache[] = HostArray(Float32, (num_vecdim(model), num_base(model)))
+        ∇C_cache[] = HostArray(Float32, (num_vecdim(model), num_base(model)))
+    end
 
     cpu_model = model
     model = to_device(cpu_model)

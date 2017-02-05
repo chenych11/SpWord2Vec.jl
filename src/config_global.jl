@@ -20,6 +20,7 @@ if BACKEND == "GPU"
     using CUDArt: CudaArray, device
     typealias TrainArray CudaArray
     device(DEVICE)
+    info("Using device $DEVICE")
     const vec_lib = joinpath(homedir(), "lib", "VecLib.so")
 else
     typealias TrainArray Array
