@@ -8,4 +8,5 @@ include("SpSkipGramC.jl")
 include("SpSkipGramD.jl")
 include("SpSkipGramE.jl")
 include("SpSkipGramBa.jl")
+include("SpSkipGramBb.jl")
 end # module
